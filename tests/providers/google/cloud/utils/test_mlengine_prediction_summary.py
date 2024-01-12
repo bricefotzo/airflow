@@ -23,11 +23,14 @@ from unittest import mock
 import dill
 import pytest
 
-try:
+from airflow import PY312
+
+if not PY312:
     from airflow.providers.google.cloud.utils import mlengine_prediction_summary
-except ImportError as e:
-    if "apache_beam" in str(e):
-        pytestmark = pytest.mark.skip(f"package apache_beam not present. Skipping all tests in {__name__}")
+else:
+    pytestmark = pytest.mark.skip(
+        f"package apache_beam is not available for PY312. Skipping all tests in {__name__}"
+    )
 
 
 class TestJsonCode:
@@ -84,23 +87,28 @@ class TestMakeSummary:
                 ]
             )
 
-    @mock.patch.object(mlengine_prediction_summary.beam.pipeline, "PipelineOptions")
-    @mock.patch.object(mlengine_prediction_summary.beam, "Pipeline")
-    @mock.patch.object(mlengine_prediction_summary.beam.io, "ReadFromText")
     def test_run_should_not_fail_with_valid_fn(self, io_mock, pipeline_obj_mock, pipeline_mock):
-        def metric_function():
-            return 1
+        with mock.patch.object(
+            mlengine_prediction_summary.beam.pipeline, "PipelineOptions"
+        ) as pipeline_mock, mock.patch.object(
+            mlengine_prediction_summary.beam, "Pipeline"
+        ) as pipeline_obj_mock, mock.patch.object(
+            mlengine_prediction_summary.beam.io, "ReadFromText"
+        ) as io_mock:
 
-        fn_enc = base64.b64encode(dill.dumps(metric_function)).decode("utf-8")
+            def metric_function():
+                return 1
 
-        mlengine_prediction_summary.run(
-            [
-                "--prediction_path=some/path",
-                "--metric_fn_encoded=" + fn_enc,
-                "--metric_keys=a",
-            ]
-        )
+            fn_enc = base64.b64encode(dill.dumps(metric_function)).decode("utf-8")
 
-        pipeline_mock.assert_called_once_with([])
-        pipeline_obj_mock.assert_called_once()
-        io_mock.assert_called_once()
+            mlengine_prediction_summary.run(
+                [
+                    "--prediction_path=some/path",
+                    "--metric_fn_encoded=" + fn_enc,
+                    "--metric_keys=a",
+                ]
+            )
+
+            pipeline_mock.assert_called_once_with([])
+            pipeline_obj_mock.assert_called_once()
+            io_mock.assert_called_once()

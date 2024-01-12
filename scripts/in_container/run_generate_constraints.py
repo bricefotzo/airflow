@@ -260,11 +260,15 @@ def uninstall_all_packages(config_params: ConfigParams):
     )
 
 
-def get_all_active_provider_packages() -> list[str]:
+def get_all_active_provider_packages(python_version: str | None = None) -> list[str]:
     return [
         f"apache-airflow-providers-{provider.replace('.','-')}"
         for provider in ALL_PROVIDER_DEPENDENCIES.keys()
         if ALL_PROVIDER_DEPENDENCIES[provider]["state"] == "ready"
+        and (
+            python_version is None
+            or python_version not in ALL_PROVIDER_DEPENDENCIES[provider]["excluded-python-versions"]
+        )
     ]
 
 
@@ -290,7 +294,7 @@ def generate_constraints_pypi_providers(config_params: ConfigParams) -> None:
     :return:
     """
     dist_dir = Path("/dist")
-    all_provider_packages = get_all_active_provider_packages()
+    all_provider_packages = get_all_active_provider_packages(python_version=config_params.python)
     chicken_egg_prefixes = []
     packages_to_install = []
     console.print("[bright_blue]Installing Airflow with PyPI providers with eager upgrade")
@@ -315,6 +319,7 @@ def generate_constraints_pypi_providers(config_params: ConfigParams) -> None:
                     f"a chicken egg provider"
                 )
                 packages_to_install.append(file.as_posix())
+                continue
             else:
                 console.print(
                     f"[yellow]Skipping {provider_package} as it is not found in dist folder to install."
