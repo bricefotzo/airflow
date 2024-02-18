@@ -17,105 +17,111 @@
 # under the License.
 from __future__ import annotations
 
-import boto3
-import pytest
-from moto import mock_aws
+from unittest import mock
 
-from airflow.models import DAG
-from airflow.providers.amazon.aws.hooks.s3 import S3Hook
 from airflow.providers.amazon.aws.transfers.sftp_to_s3 import SFTPToS3Operator
-from airflow.providers.ssh.hooks.ssh import SSHHook
-from airflow.providers.ssh.operators.ssh import SSHOperator
-from airflow.utils.timezone import datetime
-from tests.test_utils.config import conf_vars
 
-pytestmark = pytest.mark.db_test
-
-BUCKET = "test-bucket"
+TASK_ID = "test_sftp_to_s3"
+BUCKET = "test-s3-bucket"
 S3_KEY = "test/test_1_file.csv"
 SFTP_PATH = "/tmp/remote_path.txt"
-SFTP_CONN_ID = "ssh_default"
-S3_CONN_ID = "aws_default"
-
-SFTP_MOCK_FILE = "test_sftp_file.csv"
-S3_MOCK_FILES = "test_1_file.csv"
-
-TEST_DAG_ID = "unit_tests_sftp_tos3_op"
-DEFAULT_DATE = datetime(2018, 1, 1)
+AWS_CONN_ID = "aws_default"
+SFTP_CONN_ID = "sftp_default"
+S3_KEY_MULTIPLE = "test/"
+SFTP_PATH_MULTIPLE = "/tmp/"
 
 
 class TestSFTPToS3Operator:
-    def setup_method(self):
-        hook = SSHHook(ssh_conn_id="ssh_default")
-
-        hook.no_host_key_check = True
-        dag = DAG(
-            f"{TEST_DAG_ID}test_schedule_dag_once",
-            schedule="@once",
-            start_date=DEFAULT_DATE,
+    def assert_execute(
+        self, mock_local_tmp_file, mock_s3_hook_load_file, mock_sftp_hook_retrieve_file, sftp_file, s3_file
+    ):
+        mock_local_tmp_file_value = mock_local_tmp_file.return_value.__enter__.return_value
+        mock_sftp_hook_retrieve_file.assert_called_once_with(
+            local_full_path=mock_local_tmp_file_value.name, remote_full_path=sftp_file
         )
 
-        self.hook = hook
-
-        self.ssh_client = self.hook.get_conn()
-        self.sftp_client = self.ssh_client.open_sftp()
-
-        self.dag = dag
-        self.s3_bucket = BUCKET
-        self.sftp_path = SFTP_PATH
-        self.s3_key = S3_KEY
-
-    @pytest.mark.parametrize("use_temp_file", [True, False])
-    @mock_aws
-    @conf_vars({("core", "enable_xcom_pickling"): "True"})
-    def test_sftp_to_s3_operation(self, use_temp_file):
-        # Setting
-        test_remote_file_content = (
-            "This is remote file content \n which is also multiline "
-            "another line here \n this is last line. EOF"
+        mock_s3_hook_load_file.assert_called_once_with(
+            filename=mock_local_tmp_file_value.name,
+            key=s3_file,
+            bucket_name=BUCKET,
+            replace=False,
         )
 
-        # create a test file remotely
-        create_file_task = SSHOperator(
-            task_id="test_create_file",
-            ssh_hook=self.hook,
-            command=f"echo '{test_remote_file_content}' > {self.sftp_path}",
-            do_xcom_push=True,
-            dag=self.dag,
+    @mock.patch("airflow.providers.sftp.hooks.sftp.SFTPHook.retrieve_file")
+    @mock.patch("airflow.providers.amazon.aws.hooks.s3.S3Hook.load_file")
+    @mock.patch("airflow.providers.amazon.aws.transfers.sftp_to_s3.NamedTemporaryFile")
+    def test_execute(self, mock_local_tmp_file, mock_s3_hook_load_file, mock_sftp_hook_retrieve_file):
+        operator = SFTPToS3Operator(task_id=TASK_ID, s3_bucket=BUCKET, s3_key=S3_KEY, sftp_path=SFTP_PATH)
+        operator.execute(None)
+
+        self.assert_execute(
+            mock_local_tmp_file,
+            mock_s3_hook_load_file,
+            mock_sftp_hook_retrieve_file,
+            sftp_file=operator.sftp_path,
+            s3_file=operator.s3_key,
         )
-        assert create_file_task is not None
-        create_file_task.execute(None)
 
-        # Test for creation of s3 bucket
-        s3_hook = S3Hook(aws_conn_id=None)
-        conn = boto3.client("s3")
-        conn.create_bucket(Bucket=self.s3_bucket)
-        assert s3_hook.check_for_bucket(self.s3_bucket)
-
-        # get remote file to local
-        run_task = SFTPToS3Operator(
+    @mock.patch("airflow.providers.sftp.hooks.sftp.SFTPHook.retrieve_file")
+    @mock.patch("airflow.providers.amazon.aws.hooks.s3.S3Hook.load_file")
+    @mock.patch("airflow.providers.amazon.aws.transfers.sftp_to_s3.NamedTemporaryFile")
+    def test_execute_multiple_files_different_names(
+        self, mock_local_tmp_file, mock_s3_hook_load_file, mock_sftp_hook_retrieve_file
+    ):
+        operator = SFTPToS3Operator(
+            task_id=TASK_ID,
             s3_bucket=BUCKET,
-            s3_key=S3_KEY,
-            sftp_path=SFTP_PATH,
-            sftp_conn_id=SFTP_CONN_ID,
-            s3_conn_id=S3_CONN_ID,
-            use_temp_file=use_temp_file,
-            task_id="test_sftp_to_s3",
-            dag=self.dag,
+            s3_key=S3_KEY_MULTIPLE,
+            sftp_path=SFTP_PATH_MULTIPLE,
+            sftp_filenames=["test1.txt"],
+            s3_filenames=["test1_s3.txt"],
         )
-        assert run_task is not None
+        operator.execute(None)
 
-        run_task.execute(None)
+        self.assert_execute(
+            mock_local_tmp_file,
+            mock_s3_hook_load_file,
+            mock_sftp_hook_retrieve_file,
+            sftp_file=operator.sftp_path + operator.sftp_filenames[0],
+            s3_file=operator.s3_key + operator.s3_filenames[0],
+        )
 
-        # Check if object was created in s3
-        objects_in_dest_bucket = conn.list_objects(Bucket=self.s3_bucket, Prefix=self.s3_key)
-        # there should be object found, and there should only be one object found
-        assert len(objects_in_dest_bucket["Contents"]) == 1
+    @mock.patch("airflow.providers.sftp.hooks.sftp.SFTPHook.retrieve_file")
+    @mock.patch("airflow.providers.amazon.aws.hooks.s3.S3Hook.load_file")
+    @mock.patch("airflow.providers.amazon.aws.transfers.sftp_to_s3.NamedTemporaryFile")
+    def test_execute_multiple_files_same_names(
+        self, mock_local_tmp_file, mock_s3_hook_load_file, mock_sftp_hook_retrieve_file
+    ):
+        operator = SFTPToS3Operator(
+            task_id=TASK_ID,
+            s3_bucket=BUCKET,
+            s3_key=S3_KEY_MULTIPLE,
+            sftp_path=SFTP_PATH_MULTIPLE,
+            sftp_filenames=["test1.txt"],
+        )
+        operator.execute(None)
 
-        # the object found should be consistent with dest_key specified earlier
-        assert objects_in_dest_bucket["Contents"][0]["Key"] == self.s3_key
+        self.assert_execute(
+            mock_local_tmp_file,
+            mock_s3_hook_load_file,
+            mock_sftp_hook_retrieve_file,
+            sftp_file=operator.sftp_path + operator.sftp_filenames[0],
+            s3_file=operator.s3_key + operator.sftp_filenames[0],
+        )
 
-        # Clean up after finishing with test
-        conn.delete_object(Bucket=self.s3_bucket, Key=self.s3_key)
-        conn.delete_bucket(Bucket=self.s3_bucket)
-        assert not s3_hook.check_for_bucket(self.s3_bucket)
+    @mock.patch("airflow.providers.sftp.hooks.sftp.SFTPHook.list_directory")
+    def test_execute_multiple_files_prefix(
+        self,
+        mock_sftp_hook_list_directory,
+    ):
+        operator = SFTPToS3Operator(
+            task_id=TASK_ID,
+            s3_bucket=BUCKET,
+            s3_key=S3_KEY_MULTIPLE,
+            sftp_path=SFTP_PATH_MULTIPLE,
+            sftp_filenames="test_prefix",
+            s3_filenames="s3_prefix",
+        )
+        operator.execute(None)
+
+        mock_sftp_hook_list_directory.assert_called_once_with(path=SFTP_PATH_MULTIPLE)

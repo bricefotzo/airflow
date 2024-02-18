@@ -24,6 +24,7 @@ from urllib.parse import urlsplit
 from airflow.models import BaseOperator
 from airflow.providers.amazon.aws.hooks.s3 import S3Hook
 from airflow.providers.ssh.hooks.ssh import SSHHook
+from airflow.providers.sftp.hooks.sftp import SFTPHook
 
 if TYPE_CHECKING:
     from airflow.utils.context import Context
@@ -59,8 +60,11 @@ class SFTPToS3Operator(BaseOperator):
         s3_bucket: str,
         s3_key: str,
         sftp_path: str,
-        sftp_conn_id: str = "ssh_default",
+        sftp_filenames: str | list[str] | None = None,
+        s3_filenames: str | list[str] | None = None,
+        sftp_conn_id: str = "sftp_default",
         s3_conn_id: str = "aws_default",
+        replace: bool = False,
         use_temp_file: bool = True,
         **kwargs,
     ) -> None:
@@ -71,6 +75,11 @@ class SFTPToS3Operator(BaseOperator):
         self.s3_key = s3_key
         self.s3_conn_id = s3_conn_id
         self.use_temp_file = use_temp_file
+        self.replace = replace
+        self.sftp_filenames = sftp_filenames
+        self.s3_filenames = s3_filenames
+        self.s3_hook: S3Hook | None = None
+        self.sftp_hook: SFTPHook | None = None
 
     @staticmethod
     def get_s3_key(s3_key: str) -> str:
@@ -78,18 +87,51 @@ class SFTPToS3Operator(BaseOperator):
         parsed_s3_key = urlsplit(s3_key)
         return parsed_s3_key.path.lstrip("/")
 
-    def execute(self, context: Context) -> None:
-        self.s3_key = self.get_s3_key(self.s3_key)
-        ssh_hook = SSHHook(ssh_conn_id=self.sftp_conn_id)
-        s3_hook = S3Hook(self.s3_conn_id)
+    def __upload_to_s3_from_sftp(self, remote_filename, s3_file_key):
+        with NamedTemporaryFile() as local_tmp_file:
+            self.sftp_hook.retrieve_file(
+                remote_full_path=remote_filename, local_full_path=local_tmp_file.name
+            )
 
-        sftp_client = ssh_hook.get_conn().open_sftp()
+            self.s3_hook.load_file(
+                filename=local_tmp_file.name,
+                key=s3_file_key,
+                bucket_name=self.s3_bucket,
+                replace=self.replace
+            )
+            self.log.info("File upload to %s", s3_file_key)
 
-        if self.use_temp_file:
-            with NamedTemporaryFile("w") as f:
-                sftp_client.get(self.sftp_path, f.name)
+    def execute(self, context: Context):
+        self.sftp_hook = SFTPHook(ssh_conn_id=self.sftp_conn_id)
+        self.s3_hook = S3Hook(self.s3_conn_id)
 
-                s3_hook.load_file(filename=f.name, key=self.s3_key, bucket_name=self.s3_bucket, replace=True)
+        def resolve_filenames(pattern, filenames):
+            if pattern == "*":
+                return filenames
+            else:
+                return [f for f in filenames if pattern in f]
+
+        def generate_s3_key(filename):
+            if self.s3_filenames and isinstance(self.s3_filenames, str):
+                return f"{self.s3_key}{filename.replace(self.ftp_filenames, self.s3_filenames)}"
+            return f"{self.s3_key}{filename}"
+
+        if self.sftp_filenames:
+            if isinstance(self.sftp_filenames, str):
+                self.log.info("Getting files in %s", self.sftp_path)
+
+                list_dir = self.sftp_hook.list_directory(path=self.sftp_path)
+                files = resolve_filenames(self.sftp_filenames, list_dir)
+
+                for file in files:
+                    self.log.info("Moving file %s", file)
+                    s3_file_key = generate_s3_key(file)
+                    self.__upload_to_s3_from_sftp(file, s3_file_key)
+
+            else:  # Assuming ftp_filenames is a list
+                for sftp_file, s3_file in zip(self.sftp_filenames, self.s3_filenames if self.s3_filenames else self.sftp_filenames):
+                    sftp_path = self.sftp_path + sftp_file
+                    s3_key = self.s3_key + (s3_file if self.s3_filenames else sftp_file)
+                    self.__upload_to_s3_from_sftp(sftp_path, s3_key)
         else:
-            with sftp_client.file(self.sftp_path, mode="rb") as data:
-                s3_hook.get_conn().upload_fileobj(data, self.s3_bucket, self.s3_key, Callback=self.log.info)
+            self.__upload_to_s3_from_sftp(self.sftp_path, self.s3_key)
