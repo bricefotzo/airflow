@@ -42,7 +42,7 @@ class SFTPToS3Operator(BaseOperator):
         establishing a connection to the SFTP server.
     :param sftp_path: The sftp remote path. This is the specified file path
         for downloading the file from the SFTP server.
-    :param s3_conn_id: The s3 connection id. The name or identifier for
+    :param aws_conn_id: The s3 connection id. The name or identifier for
         establishing a connection to S3
     :param s3_bucket: The targeted s3 bucket. This is the S3 bucket to where
         the file is uploaded.
@@ -63,7 +63,7 @@ class SFTPToS3Operator(BaseOperator):
         sftp_filenames: str | list[str] | None = None,
         s3_filenames: str | list[str] | None = None,
         sftp_conn_id: str = "sftp_default",
-        s3_conn_id: str = "aws_default",
+        aws_conn_id: str = "aws_default",
         replace: bool = False,
         use_temp_file: bool = True,
         **kwargs,
@@ -73,7 +73,7 @@ class SFTPToS3Operator(BaseOperator):
         self.sftp_path = sftp_path
         self.s3_bucket = s3_bucket
         self.s3_key = s3_key
-        self.s3_conn_id = s3_conn_id
+        self.aws_conn_id = aws_conn_id
         self.use_temp_file = use_temp_file
         self.replace = replace
         self.sftp_filenames = sftp_filenames
@@ -103,7 +103,7 @@ class SFTPToS3Operator(BaseOperator):
 
     def execute(self, context: Context):
         self.sftp_hook = SFTPHook(ssh_conn_id=self.sftp_conn_id)
-        self.s3_hook = S3Hook(self.s3_conn_id)
+        self.s3_hook = S3Hook(self.aws_conn_id)
 
         def resolve_filenames(pattern, filenames):
             if pattern == "*":
@@ -128,7 +128,7 @@ class SFTPToS3Operator(BaseOperator):
                     s3_file_key = generate_s3_key(file)
                     self.__upload_to_s3_from_sftp(file, s3_file_key)
 
-            else:  # Assuming ftp_filenames is a list
+            else:  
                 for sftp_file, s3_file in zip(self.sftp_filenames, self.s3_filenames if self.s3_filenames else self.sftp_filenames):
                     sftp_path = self.sftp_path + sftp_file
                     s3_key = self.s3_key + (s3_file if self.s3_filenames else sftp_file)

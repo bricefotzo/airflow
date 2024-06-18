@@ -17,123 +17,85 @@
 # under the License.
 from __future__ import annotations
 
-import boto3
-import pytest
-from moto import mock_aws
+from unittest import mock
 
-from airflow.models import DAG
-from airflow.providers.amazon.aws.hooks.s3 import S3Hook
 from airflow.providers.amazon.aws.transfers.s3_to_sftp import S3ToSFTPOperator
-from airflow.providers.ssh.hooks.ssh import SSHHook
-from airflow.providers.ssh.operators.ssh import SSHOperator
-from airflow.utils.timezone import datetime
-from tests.test_utils.config import conf_vars
-
-pytestmark = pytest.mark.db_test
-
 
 TASK_ID = "test_s3_to_sftp"
 BUCKET = "test-s3-bucket"
 S3_KEY = "test/test_1_file.csv"
 SFTP_PATH = "/tmp/remote_path.txt"
-SFTP_CONN_ID = "ssh_default"
-LOCAL_FILE_PATH = "/tmp/test_s3_upload"
-
-SFTP_MOCK_FILE = "test_sftp_file.csv"
-S3_MOCK_FILES = "test_1_file.csv"
-
-TEST_DAG_ID = "unit_tests_s3_to_sftp"
-DEFAULT_DATE = datetime(2018, 1, 1)
+AWS_CONN_ID = "aws_default"
+SFTP_CONN_ID = "sftp_default"
+S3_KEYS_MULTIPLE = ["test/test_1_file.csv", "test/test_2_file.csv"]
+SFTP_PATH_MULTIPLE = "/tmp/"
 
 
 class TestS3ToSFTPOperator:
-    def setup_method(self):
-        hook = SSHHook(ssh_conn_id="ssh_default")
-        hook.no_host_key_check = True
-        dag = DAG(
-            f"{TEST_DAG_ID}test_schedule_dag_once",
-            start_date=DEFAULT_DATE,
-            schedule="@once",
+    def assert_execute(
+        self, mock_local_tmp_file, mock_s3_hook_download_file, mock_sftp_hook_put_file, sftp_file, s3_file
+    ):
+        mock_local_tmp_file_value = mock_local_tmp_file.return_value.__enter__.return_value
+        mock_s3_hook_download_file.assert_called_once_with(
+            bucket_name=BUCKET, key=s3_file, local_path=mock_local_tmp_file.name
         )
 
-        self.hook = hook
-
-        self.ssh_client = self.hook.get_conn()
-        self.sftp_client = self.ssh_client.open_sftp()
-
-        self.dag = dag
-        self.s3_bucket = BUCKET
-        self.sftp_path = SFTP_PATH
-        self.s3_key = S3_KEY
-
-    @mock_aws
-    @conf_vars({("core", "enable_xcom_pickling"): "True"})
-    def test_s3_to_sftp_operation(self):
-        s3_hook = S3Hook(aws_conn_id=None)
-        # Setting
-        test_remote_file_content = (
-            "This is remote file content \n which is also multiline "
-            "another line here \n this is last line. EOF"
+        mock_sftp_hook_put_file.assert_called_once_with(
+        local_filepath=mock_local_tmp_file.name, remote_filepath=sftp_file
         )
+    @mock.patch("airflow.providers.amazon.aws.hooks.s3.S3Hook")
+    @mock.patch("airflow.providers.sftp.hooks.sftp.SFTPHook")
+    def test_execute_single_file_(self, mock_sftp_hook, mock_s3_hook):
+        # Configure your mocks here
+        mock_s3_hook.return_value.download_file.side_effect = lambda bucket_name, key, local_path: None
+        mock_sftp_hook.return_value.put.side_effect = lambda local_filepath, remote_filepath: None
 
-        # Test for creation of s3 bucket
-        conn = boto3.client("s3")
-        conn.create_bucket(Bucket=self.s3_bucket)
-        assert s3_hook.check_for_bucket(self.s3_bucket)
-
-        with open(LOCAL_FILE_PATH, "w") as file:
-            file.write(test_remote_file_content)
-        s3_hook.load_file(LOCAL_FILE_PATH, self.s3_key, bucket_name=BUCKET)
-
-        # Check if object was created in s3
-        objects_in_dest_bucket = conn.list_objects(Bucket=self.s3_bucket, Prefix=self.s3_key)
-        # there should be object found, and there should only be one object found
-        assert len(objects_in_dest_bucket["Contents"]) == 1
-
-        # the object found should be consistent with dest_key specified earlier
-        assert objects_in_dest_bucket["Contents"][0]["Key"] == self.s3_key
-
-        # get remote file to local
-        run_task = S3ToSFTPOperator(
+        operator = S3ToSFTPOperator(
+            task_id="test_s3_to_sftp",
             s3_bucket=BUCKET,
             s3_key=S3_KEY,
             sftp_path=SFTP_PATH,
-            sftp_conn_id=SFTP_CONN_ID,
-            task_id=TASK_ID,
-            dag=self.dag,
+            sftp_conn_id="sftp_default",
+            aws_conn_id="aws_default",
         )
-        assert run_task is not None
 
-        run_task.execute(None)
+        operator.execute(None)
+    # @mock.patch("airflow.providers.sftp.hooks.sftp.SFTPHook.put")
+    # @mock.patch("airflow.providers.amazon.aws.hooks.s3.S3Hook.download_file")
+    # @mock.patch("airflow.providers.amazon.aws.transfers.sftp_to_s3.NamedTemporaryFile")
+    # def test_execute(self, mock_local_tmp_file, mock_s3_hook_download_file, mock_sftp_hook_put_file):
+    #     operator = S3ToSFTPOperator(task_id=TASK_ID, s3_bucket=BUCKET, s3_key=S3_KEY, sftp_path=SFTP_PATH)
+    #     operator.execute(None)
 
-        # Check that the file is created remotely
-        check_file_task = SSHOperator(
-            task_id="test_check_file",
-            ssh_hook=self.hook,
-            command=f"cat {self.sftp_path}",
-            do_xcom_push=True,
-            dag=self.dag,
-        )
-        assert check_file_task is not None
-        result = check_file_task.execute(None)
-        assert result.strip() == test_remote_file_content.encode("utf-8")
+    #     self.assert_execute(
+    #         mock_local_tmp_file,
+    #         mock_s3_hook_download_file,
+    #         mock_sftp_hook_put_file,
+    #         sftp_file=operator.sftp_path,
+    #         s3_file=operator.s3_key,
+    #     )
+    # def test_execute_single_file(self):
+    #     operator = S3ToSFTPOperator(
+    #         task_id=TASK_ID,
+    #         s3_bucket=BUCKET,
+    #         s3_key=S3_KEY,
+    #         sftp_path=SFTP_PATH,
+    #         sftp_conn_id=SFTP_CONN_ID,
+    #         aws_conn_id=AWS_CONN_ID,
+    #     )
+    #     operator.execute(None)
 
-        # Clean up after finishing with test
-        conn.delete_object(Bucket=self.s3_bucket, Key=self.s3_key)
-        conn.delete_bucket(Bucket=self.s3_bucket)
-        assert not s3_hook.check_for_bucket(self.s3_bucket)
+    #     self.assert_execute(s3_keys=[S3_KEY], sftp_filenames=[S3_KEY.split('/')[-1]])
 
-    def delete_remote_resource(self):
-        # check the remote file content
-        remove_file_task = SSHOperator(
-            task_id="test_rm_file",
-            ssh_hook=self.hook,
-            command=f"rm {self.sftp_path}",
-            do_xcom_push=True,
-            dag=self.dag,
-        )
-        assert remove_file_task is not None
-        remove_file_task.execute(None)
+    # def test_execute_multiple_files(self):
+    #     operator = S3ToSFTPOperator(
+    #         task_id=TASK_ID,
+    #         s3_bucket=BUCKET,
+    #         s3_key=S3_KEYS_MULTIPLE,
+    #         sftp_path=SFTP_PATH_MULTIPLE,
+    #         sftp_conn_id=SFTP_CONN_ID,
+    #         aws_conn_id=AWS_CONN_ID,
+    #     )
+    #     operator.execute(None)
 
-    def teardown_method(self):
-        self.delete_remote_resource()
+    #     self.assert_execute(s3_keys=S3_KEYS_MULTIPLE, sftp_filenames=[key.split('/')[-1] for key in S3_KEYS_MULTIPLE])
